@@ -113,39 +113,21 @@ async def call_image_api(prompt: str, size: str, quality: str, n: int) -> list[s
                 "imageConfig": {"aspectRatio": "1:1", "imageSize": "1k"},
             },
         }
-        url = f"https://aihubmix.com/gemini/v1beta/models/{IMAGE_MODEL}:streamGenerateContent"
+        # 用非流式接口，更稳定
+        url = f"https://aihubmix.com/gemini/v1beta/models/{IMAGE_MODEL}:generateContent"
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(url, headers=gemini_headers, json=gemini_payload)
             if resp.status_code != 200:
                 raise HTTPException(status_code=resp.status_code,
                                     detail=f"Gemini image error: {resp.text}")
-            # 流式响应是 JSON 数组，拼接后解析
             import json as _json
-            raw = resp.text.strip()
-            # 去掉首尾的 [ ]，按 ,\n{ 分割每个 chunk
-            if raw.startswith("["):
-                raw = raw[1:]
-            if raw.endswith("]"):
-                raw = raw[:-1]
+            data = resp.json()
             b64_list = []
-            # 尝试直接 parse 整体
-            try:
-                chunks = _json.loads(f"[{raw}]")
-            except Exception:
-                chunks = []
-                for line in raw.splitlines():
-                    line = line.strip().rstrip(",")
-                    if line.startswith("{"):
-                        try:
-                            chunks.append(_json.loads(line))
-                        except Exception:
-                            pass
-            for chunk in chunks:
-                for cand in chunk.get("candidates", []):
-                    for part in cand.get("content", {}).get("parts", []):
-                        inline = part.get("inlineData", {})
-                        if inline.get("data"):
-                            b64_list.append(inline["data"])
+            for cand in data.get("candidates", []):
+                for part in cand.get("content", {}).get("parts", []):
+                    inline = part.get("inlineData", {})
+                    if inline.get("data"):
+                        b64_list.append(inline["data"])
             return b64_list
 
     # 其他模型（dall-e-3, flux 等）走标准 images/generations
