@@ -82,11 +82,10 @@ def upload_to_qiniu(data: bytes, filename: str) -> str:
     """上传字节到七牛，返回公开访问 URL"""
     q = Auth(QINIU_ACCESS_KEY, QINIU_SECRET_KEY)
     token = q.upload_token(QINIU_BUCKET, filename, 3600)
-    ret, info = put_data(token, filename, data)
+    ret, info = put_data(token, filename, data, hostscache_dir='/tmp')
     if info.status_code != 200:
         raise HTTPException(status_code=500, detail=f"Qiniu upload failed: {info}")
     domain = QINIU_DOMAIN.rstrip("/")
-    # 测试域名只支持 http
     return f"http://{domain}/{filename}"
 
 
@@ -100,6 +99,56 @@ async def call_image_api(prompt: str, size: str, quality: str, n: int) -> list[s
         "Authorization": f"Bearer {AIHUBMIX_API_KEY}",
         "Content-Type": "application/json",
     }
+
+    # Gemini 走原生 streamGenerateContent 接口
+    if "gemini" in IMAGE_MODEL.lower():
+        gemini_headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": AIHUBMIX_API_KEY,
+        }
+        gemini_payload = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "responseModalities": ["TEXT", "IMAGE"],
+                "imageConfig": {"aspectRatio": "1:1", "imageSize": "1k"},
+            },
+        }
+        url = f"https://aihubmix.com/gemini/v1beta/models/{IMAGE_MODEL}:streamGenerateContent"
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(url, headers=gemini_headers, json=gemini_payload)
+            if resp.status_code != 200:
+                raise HTTPException(status_code=resp.status_code,
+                                    detail=f"Gemini image error: {resp.text}")
+            # 流式响应是 JSON 数组，拼接后解析
+            import json as _json
+            raw = resp.text.strip()
+            # 去掉首尾的 [ ]，按 ,\n{ 分割每个 chunk
+            if raw.startswith("["):
+                raw = raw[1:]
+            if raw.endswith("]"):
+                raw = raw[:-1]
+            b64_list = []
+            # 尝试直接 parse 整体
+            try:
+                chunks = _json.loads(f"[{raw}]")
+            except Exception:
+                chunks = []
+                for line in raw.splitlines():
+                    line = line.strip().rstrip(",")
+                    if line.startswith("{"):
+                        try:
+                            chunks.append(_json.loads(line))
+                        except Exception:
+                            pass
+            for chunk in chunks:
+                for cand in chunk.get("candidates", []):
+                    for part in cand.get("content", {}).get("parts", []):
+                        inline = part.get("inlineData", {})
+                        if inline.get("data"):
+                            b64_list.append(inline["data"])
+            return b64_list
+
+    # 其他模型（dall-e-3, flux 等）走标准 images/generations
     payload = {
         "model": IMAGE_MODEL,
         "prompt": prompt,
