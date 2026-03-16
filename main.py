@@ -313,6 +313,28 @@ async def generate_video(
     )
 
 
+# 视频生成（同步，阻塞等待完成）→ 直接返回 URL，适合 Dify 单节点调用
+@app.post("/generate-video-sync")
+async def generate_video_sync(
+    req: VideoRequest,
+    x_api_token: str = Header(default=""),
+):
+    check_token(x_api_token)
+    video_id = await submit_video_task(
+        req.prompt, req.size, req.seconds, req.image_url)
+
+    # 在服务端同步等待
+    task_id = f"sync_{uuid.uuid4().hex[:8]}"
+    video_tasks[task_id] = {"status": "processing"}
+    await poll_and_upload(task_id, video_id)
+
+    task = video_tasks.get(task_id, {})
+    if task.get("status") == "done":
+        return {"url": task["url"], "markdown": task["markdown"]}
+    else:
+        raise HTTPException(status_code=500, detail=task.get("error", "Video generation failed"))
+
+
 # 查询视频状态
 @app.get("/video-status/{task_id}", response_model=VideoStatusResponse)
 async def video_status(
