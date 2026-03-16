@@ -224,24 +224,23 @@ async def poll_and_upload(task_id: str, video_id: str):
                         or ""
                     )
 
-                    if direct_url:
-                        async with httpx.AsyncClient(timeout=120,
-                                                      follow_redirects=True) as dl:
-                            dl_resp = await dl.get(direct_url)
-                        video_bytes = dl_resp.content
-                    else:
-                        # 没有 URL，走 /content 下载
-                        async with httpx.AsyncClient(timeout=120,
-                                                      follow_redirects=True) as dl:
-                            dl_resp = await dl.get(
-                                f"{AIHUBMIX_BASE_URL}/videos/{video_id}/content",
-                                headers=headers)
-                        if dl_resp.status_code != 200:
-                            video_tasks[task_id] = {
-                                "status": "failed",
-                                "error": f"Download failed: {dl_resp.status_code}"}
-                            return
-                        video_bytes = dl_resp.content
+                    # 统一走 /content 接口下载（需要带 Authorization）
+                    async with httpx.AsyncClient(timeout=300,
+                                                  follow_redirects=True) as dl:
+                        dl_resp = await dl.get(
+                            f"{AIHUBMIX_BASE_URL}/videos/{video_id}/content",
+                            headers=headers)
+                    if dl_resp.status_code != 200:
+                        video_tasks[task_id] = {
+                            "status": "failed",
+                            "error": f"Download failed: {dl_resp.status_code} {dl_resp.text[:200]}"}
+                        return
+                    video_bytes = dl_resp.content
+                    if len(video_bytes) < 1000:
+                        video_tasks[task_id] = {
+                            "status": "failed",
+                            "error": f"Video too small ({len(video_bytes)} bytes): {video_bytes[:200]}"}
+                        return
 
                     filename = f"ai-videos/{uuid.uuid4().hex}.mp4"
                     oss_url = upload_to_qiniu(video_bytes, filename)
